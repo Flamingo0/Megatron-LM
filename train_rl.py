@@ -88,6 +88,7 @@ def loss_func(
     truncated_from_above: torch.Tensor,
     truncated_from_below: torch.Tensor,
     output_tensor: torch.Tensor,
+    channel_ids: torch.Tensor | None = None,
 ):
     """Loss function.
 
@@ -181,6 +182,28 @@ def loss_func(
         'rl/truncated_from_below': reporting_truncated_from_below,
     }
 
+    if getattr(args, "enable_channel_loss", False):
+        if channel_ids is None:
+            output_dict["channel/unknown loss"] = torch.cat(
+                [torch.sum(losses_flat * loss_mask_flat).view(1), total_tokens.view(1)]
+            )
+        else:
+            channel_ids = channel_ids.to(device).reshape(-1)
+            masked = loss_mask_flat > 0
+            if masked.any():
+                unique_channels = channel_ids[masked].unique()
+                for channel in unique_channels:
+                    channel_mask = masked & (channel_ids == channel)
+                    channel_loss = torch.sum(losses_flat[channel_mask])
+                    channel_tokens = channel_mask.sum().to(total_tokens.dtype)
+                    output_dict[f"channel/type_{int(channel.item())} loss"] = torch.cat(
+                        [channel_loss.clone().detach().view(1), channel_tokens.view(1)]
+                    )
+            else:
+                output_dict["channel/unknown loss"] = torch.cat(
+                    [torch.zeros(1, device=device), torch.ones(1, device=device)]
+                )
+
     # Add metadata about number of sequences processed in this batch
     # This is crucial for correct sample counting with sequence packing
     # Note: This information needs to be determined in forward_step where we have access to the batch data
@@ -221,21 +244,35 @@ def forward_step(data_iterator, model: GPTModel, loss_only: bool = False):
             seq_starts,
             seq_lengths,
             seq_indices,
+            seq_sample_types,
             packed_seq_params,
         ) = load_packed_data_by_index(bin_tensor.item(), runtime_state.packing_context, args.rl_inference_logprobs_is_correction)
 
         runtime_state.increment_sequences(len(seq_indices))
     else:
         # Extract unpacked data
-        (
-            tokens,
-            advantages,
-            old_logprobs,
-            loss_mask,
-            position_ids,
-            ref_logprobs,
-            inference_logprobs,
-        ) = batch_data
+        if len(batch_data) == 8:
+            (
+                tokens,
+                advantages,
+                old_logprobs,
+                loss_mask,
+                position_ids,
+                ref_logprobs,
+                inference_logprobs,
+                seq_sample_types,
+            ) = batch_data
+        else:
+            (
+                tokens,
+                advantages,
+                old_logprobs,
+                loss_mask,
+                position_ids,
+                ref_logprobs,
+                inference_logprobs,
+            ) = batch_data
+            seq_sample_types = None
 
         seq_starts = None
         seq_lengths = None
@@ -251,6 +288,7 @@ def forward_step(data_iterator, model: GPTModel, loss_only: bool = False):
         inference_logprobs = (
             inference_logprobs.cuda() if args.rl_inference_logprobs_is_correction else None
         )
+        seq_sample_types = seq_sample_types.cuda() if isinstance(seq_sample_types, torch.Tensor) else None
 
         runtime_state.increment_sequences(tokens.shape[0])
 
@@ -310,6 +348,19 @@ def forward_step(data_iterator, model: GPTModel, loss_only: bool = False):
             )
             output_tensor = loss
 
+    channel_ids = None
+    if isinstance(seq_sample_types, torch.Tensor):
+        if args.rl_use_sequence_packing and seq_starts is not None and seq_lengths is not None:
+            channel_ids = torch.zeros_like(loss_mask, dtype=torch.int64, device=loss_mask.device)
+            for seq_type, seq_start, seq_len in zip(seq_sample_types.tolist(), seq_starts, seq_lengths):
+                if seq_len <= 1:
+                    continue
+                start_idx = max(int(seq_start) - 1, 0)
+                end_idx = min(start_idx + int(seq_len) - 1, channel_ids.shape[1])
+                channel_ids[:, start_idx:end_idx] = int(seq_type)
+        else:
+            channel_ids = seq_sample_types.view(-1, 1).expand_as(loss_mask)
+
     # loss_mask will not be applied to 0th token as we do not have a logprob for it.
     return output_tensor, partial(
         loss_func,
@@ -319,6 +370,7 @@ def forward_step(data_iterator, model: GPTModel, loss_only: bool = False):
         entropy_term,
         truncated_from_above,
         truncated_from_below,
+        channel_ids=channel_ids,
     )
 
 

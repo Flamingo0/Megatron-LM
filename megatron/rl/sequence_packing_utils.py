@@ -69,6 +69,7 @@ class PackingContext:
     original_inference_logprobs: Optional[torch.Tensor] = None
     bin_advantages: List[torch.Tensor] = field(default_factory=list)
     cached_packed_seq_params: List[Optional[PackedSeqParams]] = field(default_factory=list)
+    sample_type_ids: Optional[torch.Tensor] = None
 
 
 def load_packed_data_by_index(bin_idx: int, packing_context: PackingContext, logprobs_is_correction: bool):
@@ -108,12 +109,15 @@ def load_packed_data_by_index(bin_idx: int, packing_context: PackingContext, log
     seq_indices = packing_info.bin_seq_indices[bin_idx]
 
     # Handle empty bins (used for padding to ensure all ranks have same iterations)
+    seq_sample_types = None
     if not seq_indices:
         seq_lengths = []
         advantages = torch.tensor([], device='cuda')
     else:
         seq_lengths = [packing_info.seq_lengths[idx] for idx in seq_indices]
         advantages = packing_context.bin_advantages[bin_idx]
+        if packing_context.sample_type_ids is not None:
+            seq_sample_types = packing_context.sample_type_ids[seq_indices]
 
     # Extract packed inference_logprobs if available
     packed_inference_logprobs = getattr(packing_context, 'packed_inference_logprobs', None)
@@ -133,6 +137,7 @@ def load_packed_data_by_index(bin_idx: int, packing_context: PackingContext, log
         seq_starts,
         seq_lengths,
         seq_indices,
+        seq_sample_types,
         packed_seq_params,
     )
 
@@ -968,7 +973,16 @@ def distribute_packed_bins(
     return packed_trajs, packed_position_ids, packed_attention_mask, packed_loss_mask, new_packing_info
 
 
-def pack_all_trajectories(trajs, generation_masks, inference_logprobs, global_advantages, bin_size, max_sequences_per_bin, packing_algo):
+def pack_all_trajectories(
+    trajs,
+    generation_masks,
+    inference_logprobs,
+    global_advantages,
+    bin_size,
+    max_sequences_per_bin,
+    packing_algo,
+    sample_type_ids=None,
+):
     tokenizer = get_tokenizer()
     data_parallel_world_size = mpu.get_data_parallel_world_size()
     data_parallel_group = mpu.get_data_parallel_group()
@@ -985,6 +999,8 @@ def pack_all_trajectories(trajs, generation_masks, inference_logprobs, global_ad
         generation_masks = _gather(generation_masks) 
         if inference_logprobs is not None:
             inference_logprobs = _gather(inference_logprobs)
+        if sample_type_ids is not None:
+            sample_type_ids = _gather(sample_type_ids)
 
     with nvtx_range("pack_sequences", time=True):
         # Create packer with max sequences per bin limit to prevent extreme imbalance
@@ -1056,6 +1072,7 @@ def pack_all_trajectories(trajs, generation_masks, inference_logprobs, global_ad
         original_inference_logprobs=inference_logprobs,
         bin_advantages=bin_advantages,
         cached_packed_seq_params=cached_packed_seq_params,
+        sample_type_ids=sample_type_ids,
     )
 
     log_packing_efficiency(packing_context)

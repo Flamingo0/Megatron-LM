@@ -310,6 +310,14 @@ class RLRuntimeState:
 _rl_runtime_state = RLRuntimeState()
 
 
+def _sample_type_to_id(sample_type: str | None) -> int:
+    if sample_type is None:
+        return 0
+    sample_type = str(sample_type)
+    return 0 if sample_type == "unknown" else zlib.crc32(sample_type.encode("utf-8"))
+
+
+
 def get_rl_runtime_state():
     """Get the global RL runtime state."""
     return _rl_runtime_state
@@ -1091,6 +1099,7 @@ def prepare_trajectories(
     trajs = []
     generation_masks = []
     inference_logprobs = []
+    sample_type_ids = []
     for rollout in rollouts:
         # traj, gen mask and logprobs are lists now.
         # each list entry is a turn, single-turn environments just have a single-element list.
@@ -1117,6 +1126,7 @@ def prepare_trajectories(
                     generation_mask.extend([False] * (seq_length - length))
             trajs.append(trajectory)
             generation_masks.append(generation_mask)
+            sample_type_ids.append(_sample_type_to_id(getattr(rollout, "sample_type", None)))
 
             if inf_logprobs is not None:
                 inf_logprobs_tensor = torch.Tensor(inf_logprobs)
@@ -1164,7 +1174,8 @@ def prepare_trajectories(
     # We should avoid the tokenizer pad token being the same as the eod token for proper loss masking,
     # But now the deepseek tokenizer has the pad token set to eod, we need to handle this.
     # assert (tokenizer.pad != tokenizer.eod), "Pad and eod should be different"
-    return trajs, generation_masks, inference_logprobs
+    sample_type_ids = torch.tensor(sample_type_ids, dtype=torch.int64, device='cpu')
+    return trajs, generation_masks, inference_logprobs, sample_type_ids
 
 
 def logprobs_forward_step(data_iterator, model, is_correction, packing_context=None):
@@ -1176,7 +1187,7 @@ def logprobs_forward_step(data_iterator, model, is_correction, packing_context=N
         # When using sequence packing, the data iterator returns a tuple with a single element, the bin index.
         bin_tensor = next(data_iterator)[0]
         #TODO(jalbericiola): change for named tuple
-        (b_trajs, _, _, _, b_posids, _, _, _, _, _, b_packed_seq_params) = (
+        (b_trajs, _, _, _, b_posids, _, _, _, _, _, _, b_packed_seq_params) = (
             load_packed_data_by_index(bin_tensor.item(), packing_context, is_correction)
         )
     else:
@@ -1324,7 +1335,7 @@ def prepare_data_for_update(
             # Sequence packing and reporting needs it global but non-packing wants it local.
 
         with nvtx_range("prepare_trajectories"):
-            trajs, generation_masks, inference_logprobs = prepare_trajectories(
+            trajs, generation_masks, inference_logprobs, sample_type_ids = prepare_trajectories(
                 rollouts, tokenizer, args.seq_length, sequence_packing, args.rl_skip_bos_token
             )
 
@@ -1339,7 +1350,8 @@ def prepare_data_for_update(
                     global_advantages, 
                     args.seq_length, 
                     args.rl_sequence_packing_max_sequences_per_bin,
-                    args.rl_sequence_packing_algo
+                    args.rl_sequence_packing_algo,
+                    sample_type_ids=sample_type_ids.to(global_advantages.device),
                     )
     
                 compute_trajs = packing_context.packed_trajs
@@ -1516,6 +1528,7 @@ def prepare_data_for_update(
                     dataset_tensors.append(inference_logprobs)
                 else:
                     dataset_tensors.append(torch.zeros_like(old_logprobs))
+                dataset_tensors.append(sample_type_ids.to(old_logprobs.device))
                 data = TensorDataset(*dataset_tensors)
                 loader = DataLoader(data, batch_size=args.micro_batch_size)
 
