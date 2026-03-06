@@ -47,6 +47,7 @@ class Rollout(AgentBaseModel):
     prompt_length: list[int] | None = None
     reward: float = None
     env_id: str = ''
+    sample_type: str | None = None
     problem_id: str | None = None
     policy_staleness: list[list[int]]
     kv_cache_staleness: list[list[int]]
@@ -62,6 +63,7 @@ class TokenRollout(AgentBaseModel):
     generation_mask: list[list[bool]] | None = None
     logprobs: list[list[float]] | None = None
     env_id: str = ''
+    sample_type: str | None = None
     problem_id: str | None = None
     policy_staleness: list[list[int]]
     kv_cache_staleness: list[list[int]]

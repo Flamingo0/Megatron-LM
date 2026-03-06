@@ -372,7 +372,7 @@ class TestRLUtils:
             [model], {}, rollouts, tokenizer, sequence_packing=False, is_correction=False
         )
 
-        _, _, old_logprobs, _, _, _, _ = next(data_iter)
+        _, _, old_logprobs, _, _, _, _, _ = next(data_iter)
         # All logits are ones in the MockModel.
         # All probabilities should be uniform.
         torch.testing.assert_close(old_logprobs.exp(), torch.ones_like(old_logprobs) / VOCAB)
@@ -431,7 +431,7 @@ class TestRLUtils:
 
         rollouts = [r1, r2, r3]
 
-        trajs, genmask, inference_logprobs = rl_utils.prepare_trajectories(
+        trajs, genmask, inference_logprobs, sample_type_ids = rl_utils.prepare_trajectories(
             rollouts,
             tokenizer,
             seq_length,
@@ -460,6 +460,7 @@ class TestRLUtils:
             device=genmask.device,
         ).repeat_interleave(num_turns, dim=0)
         assert torch.equal(genmask, expected_genmask)
+        assert sample_type_ids.shape[0] == trajs.shape[0]
 
         if use_sequence_packing:
             expected_logprobs = torch.tensor(
