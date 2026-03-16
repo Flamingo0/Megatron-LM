@@ -107,3 +107,29 @@ group.add_argument('--anomaly-output-file', type=str, default='anomaly_log.jsonl
 group.add_argument('--enable-channel-profiler', action='store_true')
 group.add_argument('--enable-token-debugger', action='store_true')
 ```
+
+## 8) If you maintain an external `get_patch_args(parser)` script
+
+For patch-style parsers like:
+
+```python
+def get_patch_args(parser):
+    group = parser.add_argument_group(title="patch")
+    ...
+```
+
+you can reuse:
+
+```python
+from megatron_patch import add_anomaly_monitor_patch_args
+
+def get_patch_args(parser):
+    group = parser.add_argument_group(title="patch")
+    ...
+    add_anomaly_monitor_patch_args(group, patch_if_not_exist)
+    return parser
+```
+
+This injects the same monitor flags (`--enable-anomaly-monitor`,
+`--anomaly-start-step`, thresholds, cooldown, buffer/flush, output,
+channel/token toggles) with duplicate-check behavior compatible with patch scripts.
