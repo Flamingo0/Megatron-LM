@@ -201,6 +201,14 @@ from .dgrad_logging import enable_dgrad_logging, disable_dgrad_logging, save_dgr
 
 from . import ft_integration
 
+try:
+    from megatron_patch import AnomalyMonitor, MonitorConfig
+    _HAS_ANOMALY_MONITOR = True
+except ImportError:
+    AnomalyMonitor = None
+    MonitorConfig = None
+    _HAS_ANOMALY_MONITOR = False
+
 stimer = StragglerDetector()
 
 from megatron.core.msc_utils import MultiStorageClientFeature, open_file
@@ -2643,6 +2651,49 @@ def train(
         energy_monitor.setup()
         energy_monitor.resume()
 
+    anomaly_monitor = None
+    if args.enable_anomaly_monitor:
+        if not _HAS_ANOMALY_MONITOR:
+            print_rank_0('WARNING: --enable-anomaly-monitor is set but megatron_patch is unavailable.')
+        else:
+            anomaly_monitor = AnomalyMonitor(
+                MonitorConfig(
+                    enabled=True,
+                    monitor_start_step=args.anomaly_start_step,
+                    window_size=args.anomaly_window_size,
+                    loss_multiplier=args.anomaly_loss_multiplier,
+                    grad_multiplier=args.anomaly_grad_multiplier,
+                    loss_absolute_max=args.anomaly_loss_abs_max,
+                    grad_absolute_max=args.anomaly_grad_abs_max,
+                    cooldown_steps=args.anomaly_cooldown_steps,
+                    buffer_size=args.anomaly_buffer_size,
+                    flush_interval=args.anomaly_flush_interval,
+                    output_file=args.anomaly_output_file,
+                    enable_channel_profiler=args.enable_channel_profiler,
+                    enable_token_debugger=args.enable_token_debugger,
+                )
+            )
+
+    def _select_loss_for_monitor(loss_dict):
+        if not isinstance(loss_dict, dict) or len(loss_dict) == 0:
+            return None
+        if 'lm loss' in loss_dict:
+            return loss_dict['lm loss']
+        for value in loss_dict.values():
+            return value
+        return None
+
+    def _get_batch_for_monitor():
+        # Optional low-intrusion hook from downstream training script:
+        # args.anomaly_monitor_batch_provider() -> Dict[str, Any]
+        provider = getattr(args, 'anomaly_monitor_batch_provider', None)
+        if callable(provider):
+            try:
+                return provider()
+            except Exception as exc:
+                print_rank_0(f'WARNING: anomaly_monitor_batch_provider failed: {exc}')
+        return None
+
     timers('interval-time', log_level=0).start(barrier=True)
     print_datetime('before the start of training step')
     report_memory_flag = True
@@ -2997,6 +3048,22 @@ def train(
             pg_collection=model_pg_collection,
             is_first_iteration=is_first_iteration,
         )
+
+        if anomaly_monitor is not None:
+            anomaly_monitor.observe(
+                step=iteration,
+                loss=_select_loss_for_monitor(loss_dict),
+                grad_norm=grad_norm,
+                lr=learning_rate,
+                batch=_get_batch_for_monitor(),
+                found_inf_flag=bool(skipped_iter),
+                dp_rank=mpu.get_data_parallel_rank(with_context_parallel=True),
+                tp_rank=mpu.get_tensor_model_parallel_rank(),
+                pp_rank=mpu.get_pipeline_model_parallel_rank(),
+                pp_world_size=mpu.get_pipeline_model_parallel_world_size(),
+                dp_group=mpu.get_data_parallel_group(with_context_parallel=True),
+            )
+
         is_first_iteration = False
 
         # Evaluation.
@@ -3090,6 +3157,9 @@ def train(
     one_logger_utils.track_e2e_metrics()
 
     # Flush TensorBoard, WandB writers and one-logger.
+    if anomaly_monitor is not None:
+        anomaly_monitor.close()
+
     writer = get_tensorboard_writer()
     if writer:
         writer.flush()

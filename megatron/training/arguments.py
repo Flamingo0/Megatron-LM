@@ -70,6 +70,7 @@ def add_megatron_arguments(parser: argparse.ArgumentParser):
     parser = _add_experimental_attention_variant_args(parser)
     parser = _add_heterogeneous_args(parser)
     parser = _add_logging_args(parser)
+    parser = _add_anomaly_monitor_args(parser)
     parser = _add_straggler_detector_args(parser)
     parser = _add_workload_inspector_server_args(parser)
     parser = _add_inference_args(parser)
@@ -2117,6 +2118,39 @@ def _add_logging_args(parser):
 
     log_factory = ArgumentGroupFactory(LoggerConfig, exclude = ["log_throughput_to_tensorboard", "throughput_window_size", "memory_keys", "log_l2_norm_grad_to_tensorboard", "log_runtime_to_tensorboard", "runtime_time_unit", "filter_warnings", "modules_to_filter", "set_level_for_all_loggers", "save_config_filepath"])
     group = log_factory.build_group(parser, title="logging")
+
+    return parser
+
+
+def _add_anomaly_monitor_args(parser):
+    group = parser.add_argument_group(title='anomaly monitor')
+
+    group.add_argument('--enable-anomaly-monitor', action='store_true',
+                       help='Enable low-intrusion anomaly monitoring for training loop.')
+    group.add_argument('--anomaly-start-step', type=int, default=100,
+                       help='Global step to start anomaly monitor warmup window collection.')
+    group.add_argument('--anomaly-window-size', type=int, default=100,
+                       help='Sliding-window size used for moving average baselines.')
+    group.add_argument('--anomaly-loss-multiplier', type=float, default=3.0,
+                       help='Relative spike threshold for loss: moving_avg_loss * multiplier.')
+    group.add_argument('--anomaly-grad-multiplier', type=float, default=3.0,
+                       help='Relative spike threshold for grad-norm: moving_avg_grad * multiplier.')
+    group.add_argument('--anomaly-loss-abs-max', type=float, default=1000.0,
+                       help='Absolute loss threshold for anomaly detection.')
+    group.add_argument('--anomaly-grad-abs-max', type=float, default=100000.0,
+                       help='Absolute grad-norm threshold for anomaly detection.')
+    group.add_argument('--anomaly-cooldown-steps', type=int, default=50,
+                       help='Suppress repeated anomaly logs within this step interval.')
+    group.add_argument('--anomaly-buffer-size', type=int, default=128,
+                       help='Buffered anomaly log entries before flushing JSONL to disk.')
+    group.add_argument('--anomaly-flush-interval', type=int, default=100,
+                       help='Periodic flush interval in global train steps.')
+    group.add_argument('--anomaly-output-file', type=str, default='anomaly_log.jsonl',
+                       help='JSONL output path for anomaly records.')
+    group.add_argument('--enable-channel-profiler', action='store_true',
+                       help='Enable per-channel anomaly/quality profiling.')
+    group.add_argument('--enable-token-debugger', action='store_true',
+                       help='Enable anomaly-step token frequency diagnostics.')
 
     return parser
 
